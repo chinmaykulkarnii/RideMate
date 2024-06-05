@@ -8,6 +8,9 @@ const UserInformation = require('./models/UserInformation');
 const BookRide = require('./models/bookride');
 const bcrypt = require('bcrypt');
 const cors = require('cors');
+const otpGenerator = require('otp-generator');
+const nodemailer = require('nodemailer');
+
 app.use(cors())
 app.use(bodyParser.json());
 
@@ -17,17 +20,57 @@ mongoose.connect('mongodb://localhost:27017/myapp', {
   useUnifiedTopology: true
 });
 
-// API to get a ride
-app.post('/get-ride', async (req, res) => {
-  const { from, to, date, passengers, time } = req.body;
-  const timeObject = new Date(`${date} ${time}`);
+// API to get a ride - original
+// app.post('/get-ride',   async (req, res) => { 
+//   const { from, to, date, passengers, time } = req.body;
+//   const timeObject = new Date(`${date} ${time}`);
 
-  // Find available rides based on the provided criteria
+//   // Find available rides based on the provided criteria
+//   const availableRides = await Ride.find({
+//     source: from,
+//     destination: to,
+//     availableSeats: { $gte: passengers },
+//     startTime: {$lte: `${date}T${time}`}
+//   });
+
+//   res.json(availableRides);
+// });
+
+//edit 1
+// app.post('/get-ride', async (req, res) => { 
+//   const { from, to, date, passengers, time } = req.body;
+//   const currentDate = new Date();
+//   const selectedDate = new Date(date);
+
+//   // Filter out rides whose start time is in the past
+//   const availableRides = await Ride.find({
+//     source: new RegExp(from, 'i'),
+//     destination: new RegExp(to, 'i'),
+//     availableSeats: { $gte: passengers },
+//     startTime: { $gte: currentDate, $lte: selectedDate }
+//   });
+
+//   res.json(availableRides);
+// });
+
+
+
+app.post('/get-ride', async (req, res) => { 
+  const { from, to, date, passengers, time } = req.body;
+  const selectedDateTime = new Date(`${date}T${time}`);
+  const currentDateTime = new Date();
+
+  // Ensure selected date and time are in the future
+  if (selectedDateTime <= currentDateTime) {
+    return res.status(400).json({ error: 'Selected date and time must be in the future' });
+  }
+
+  // Filter rides whose start time is in the future
   const availableRides = await Ride.find({
-    source: from,
-    destination: to,
+    source: { $regex: new RegExp(from, 'i') },
+    destination: { $regex: new RegExp(to, 'i') },
     availableSeats: { $gte: passengers },
-    startTime: {$lte: `${date}T${time}`}
+    startTime: { $gte: currentDateTime, $lte: selectedDateTime }
   });
 
   res.json(availableRides);
@@ -35,14 +78,20 @@ app.post('/get-ride', async (req, res) => {
 
 
 
+
+
 // API to offer ride
 app.post('/offer-ride', async (req, res) => {
-  const { username, vehicleOwnerName, vehicleModel, vehicleNumber, source, destination, startTime, endTime } = req.body;
+  const { username, vehicleOwnerName, vehicleModel, vehicleNumber, source, destination, startTime, endTime, vehicleType, availableSeats } = req.body;
   // sT = Date(startTime);
   // eT = Date(endTime);
 
   // console.log(sT,eT);
   // Fetch the user information using the username
+  if (vehicleType == "bike" & availableSeats >= 2){
+    return res.status(404).json({ error: 'Bike Seats more than 1' });
+  }
+
   const userInfo = await UserInformation.findOne({ username });
   if (!userInfo) {
     return res.status(404).json({ error: 'User not found' });
@@ -58,14 +107,16 @@ app.post('/offer-ride', async (req, res) => {
     vehicleNumber,
     petFriendly: false,
     smokingAllowed: false,
-    availableSeats: 4,
+    availableSeats,
     source,
     destination,
     rating: 5.0,
     startTime,
     endTime,
     contact,
-    email
+    email,
+    vehicleType,
+
   });
 
   // Save the new ride to the database
@@ -87,6 +138,7 @@ app.post('/book-ride', async (req, res) => {
     const existingBooking = await BookRide.findOne({ username, ride_id});
     console.log(existingBooking);
     if (existingBooking != null) {
+      console.log("Booking already exists");
       return res.status(400).json({ message: 'Booking already exists for this user' });
     }
 
@@ -261,46 +313,103 @@ app.post('/login', async (req, res) => {
 
 
 
-// Route to handle user creation
+
 app.post('/signup', async (req, res) => {
   const { username, password, name, phone, email, aadharNo } = req.body;
 
   try {
-      // Check if user already exists
-      const existingUser = await User.findOne({ username });
-      if (existingUser) {
-          return res.status(400).json({ message: 'User already exists' });
+    // Check if user already exists
+    const existingUser = await User.findOne({ username });
+    if (existingUser) {
+      return res.status(400).json({ message: 'User already exists' });
+    }
+
+    // Hash the password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create a new user
+    const newUser = new User({
+      username,
+      password: hashedPassword,
+    });
+
+    // Create a new user information instance
+    const newUserInformation = new UserInformation({
+      username,
+      name,
+      phone,
+      email,
+      aadharNo,
+    });
+
+    // Save the new user to the database
+    await newUser.save();
+    await newUserInformation.save();
+
+    // Generate OTP
+    const otp = otpGenerator.generate(6, { upperCase: false, specialChars: false });
+
+    // Save OTP to the user's record or a separate OTP collection (for simplicity, saving it to the user record)
+    newUser.otp = otp;
+    await newUser.save();
+
+    // Send OTP via email (you can also send it via SMS)
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: 'deepakchaudhari265@gmail.com',
+        pass: 'yivs fgcf yqvm lrcw',
+      },
+    });
+
+    const mailOptions = {
+      from: 'deepakchaudhari265@gmail.com',
+      to: email,
+      subject: 'Your OTP Code',
+      text: `Your OTP code is ${otp}`,
+    };
+
+    transporter.sendMail(mailOptions, (error, info) => {
+      if (error) {
+        return console.log(error);
       }
+      console.log('Email sent: ' + info.response);
+    });
 
-      // Hash the password
-      const hashedPassword = await bcrypt.hash(password, 10);
-
-      // Create a new user
-      const newUser = new User({
-          username,
-          password: hashedPassword
-      });
-
-      // Create a new user information instance
-      const newUserInformation = new UserInformation({
-        username,
-        name,
-        phone,
-        email,
-        aadharNo
-      });
-
-
-      // Save the new user to the database
-      await newUser.save();
-      await newUserInformation.save();
-
-      return res.status(201).json({ message: 'User created successfully' });
+    return res.status(201).json({ message: 'User created successfully, please verify OTP' });
   } catch (error) {
-      console.error('Error creating user:', error);
-      return res.status(500).json({ message: 'Internal server error' });
+    console.error('Error creating user:', error);
+    return res.status(500).json({ message: 'Internal server error' });
   }
 });
+
+app.post('/verify-otp', async (req, res) => {
+  const { username, otp } = req.body;
+
+  try {
+    // Find the user by username
+    const user = await User.findOne({ username });
+
+    if (!user) {
+      return res.status(400).json({ message: 'User not found' });
+    }
+
+    // Check if the OTP matches
+    if (user.otp === otp) {
+      // OTP is correct, remove it from the user record
+      user.otp = null;
+      await user.save();
+
+      return res.status(200).json({ message: 'OTP verified successfully' });
+    } else {
+      return res.status(400).json({ message: 'Invalid OTP' });
+    }
+  } catch (error) {
+    console.error('Error verifying OTP:', error);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
 
 
 
